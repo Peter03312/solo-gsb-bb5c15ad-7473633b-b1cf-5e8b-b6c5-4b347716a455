@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端演示：创建批次 → 节点 → 文物 → 读数（跨节点越界 + 缺测）→ 关闭事件 →
-# 更正读数生成新版本 → 查看版本差异。
+# 更正读数生成新版本 → 查看版本差异 → 查询跨文物共因风险组。
 # 用法：BASE=http://localhost:8000 ./scripts/demo.sh
 set -euo pipefail
 BASE="${BASE:-http://localhost:8000}"
@@ -21,8 +21,11 @@ echo "== 3. 登记文物（温湿度上下限 + 采样间隔 600 秒）=="
 curl -s -X POST "$BASE/api/batches/1/artifacts" -H "$JSON" \
   -d '{"name":"青花瓷瓶","temp_min":18,"temp_max":24,"hum_min":45,"hum_max":60,"sample_interval":600}'
 echo
+curl -s -X POST "$BASE/api/batches/1/artifacts" -H "$JSON" \
+  -d '{"name":"绢画","temp_min":18,"temp_max":24,"hum_min":45,"hum_max":60,"sample_interval":600}'
+echo
 
-echo "== 4. 提交读数：温度跨节点连续越界，之后出现缺测 =="
+echo "== 4. 提交读数：文物 1 温度跨节点连续越界后缺测；文物 2 在运输车同期越界 =="
 curl -s -X POST "$BASE/api/batches/1/readings" -H "$JSON" -d '{
   "note": "首批数据",
   "readings": [
@@ -32,7 +35,10 @@ curl -s -X POST "$BASE/api/batches/1/readings" -H "$JSON" -d '{
     {"artifact_id":1,"node_id":3,"ts":"2026-10-01T08:30:00Z","temperature":25,"humidity":50},
     {"artifact_id":1,"node_id":3,"ts":"2026-10-01T08:40:00Z","temperature":21,"humidity":50},
     {"artifact_id":1,"node_id":3,"ts":"2026-10-01T09:40:00Z","temperature":26,"humidity":50},
-    {"artifact_id":1,"node_id":3,"ts":"2026-10-01T09:50:00Z","temperature":21,"humidity":50}
+    {"artifact_id":1,"node_id":3,"ts":"2026-10-01T09:50:00Z","temperature":21,"humidity":50},
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:15:00Z","temperature":26,"humidity":50},
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:25:00Z","temperature":26,"humidity":50},
+    {"artifact_id":2,"node_id":3,"ts":"2026-10-01T08:35:00Z","temperature":21,"humidity":50}
   ]}'
 echo
 
@@ -63,3 +69,13 @@ echo
 echo "== 9. 批次风险摘要 =="
 curl -s "$BASE/api/batches/1/summary"
 echo
+
+echo "== 10. 跨文物共因风险组：v1 文物1/文物2 在运输车同期温度越界（成组）；当前 v2 更正后共因消失 =="
+echo "-- 当前版本（v2，更正后）--"
+curl -s "$BASE/api/batches/1/risk-groups" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("当前版 v%d 组数: %d" % (d["version"], len(d["groups"])))'
+echo "-- 历史版本 v1 --"
+curl -s "$BASE/api/batches/1/risk-groups?version=1"
+echo
+
+echo "== 11. 旧版 v1 分组保持可查，关闭事件只更新计数（成员仍为 2 个事件）=="
+curl -s "$BASE/api/batches/1/risk-groups?version=1" | python3 -c 'import json,sys; d=json.load(sys.stdin); g=d["groups"][0]; print("v1 组:", g["group_id"], g["metric_label"], "文物数", g["artifact_count"], "事件数", g["event_count"], "共有节点", [n["name"] for n in g["common_nodes"]], "开放/关闭", g["open_events"], "/", g["closed_events"])'

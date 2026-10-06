@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, quote, urlparse
 
 from museum import db, pages, service
+from museum.riskgroups import find_risk_groups
 from museum.web import Response, Router, json_response, redirect
 
 router = Router()
@@ -47,14 +48,15 @@ def batch_page(ctx):
     batch = service.get_batch(ctx.conn, bid)
     summary = service.batch_summary(ctx.conn, bid)
     cur = service.current_version(ctx.conn, bid)
-    events, gaps = [], []
+    events, gaps, risk_groups = [], [], []
     if cur:
         names = {a["id"]: a["name"] for a in service.list_artifacts(ctx.conn, bid)}
         events = service.version_events(ctx.conn, cur["id"], names)
         gaps = service.version_gaps(ctx.conn, cur["id"], names)
+        risk_groups = find_risk_groups(events)
     return Response(pages.batch_detail(
         batch, service.list_nodes(ctx.conn, bid), service.list_artifacts(ctx.conn, bid),
-        summary, events, gaps, service.list_versions(ctx.conn, bid),
+        summary, events, gaps, risk_groups, service.list_versions(ctx.conn, bid),
         ctx.query.get("msg"), ctx.query.get("err")))
 
 
@@ -226,6 +228,24 @@ def api_version_detail(ctx):
     bid = _int(ctx.params["bid"], "批次 id")
     vno = _int(ctx.params["vno"], "版本号")
     return json_response(service.version_detail(ctx.conn, bid, vno))
+
+
+@router.route("GET", "/api/batches/<bid>/versions/<vno>/risk-groups")
+def api_version_risk_groups(ctx):
+    bid = _int(ctx.params["bid"], "批次 id")
+    vno = _int(ctx.params["vno"], "版本号")
+    return json_response(service.version_risk_groups(ctx.conn, bid, vno))
+
+
+@router.route("GET", "/api/batches/<bid>/risk-groups")
+def api_risk_groups(ctx):
+    bid = _int(ctx.params["bid"], "批次 id")
+    vno = ctx.query.get("version")
+    if vno:
+        vno = _int(vno, "版本号")
+    else:
+        vno = None
+    return json_response(service.version_risk_groups(ctx.conn, bid, vno))
 
 
 @router.route("GET", "/api/batches/<bid>/diff")

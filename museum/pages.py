@@ -164,7 +164,43 @@ def _event_rows(events, batch_id, closable):
     return rows or '<tr><td colspan="10" class="muted">无风险事件。</td></tr>'
 
 
-def batch_detail(batch, nodes, artifacts, summary, events, gaps, versions,
+def _risk_groups_card(groups, title, hint=None):
+    if not groups:
+        rows = '<tr><td colspan="7" class="muted">无跨文物共因风险组（需同一指标、时间闭区间相交且共享运输节点，并覆盖至少两件文物）。</td></tr>'
+    else:
+        rows = ""
+        for g in groups:
+            arts = "、".join(
+                f'{escape(a["name"])}（#{a["id"]}）' for a in g["artifacts"])
+            common = "、".join(escape(n["name"]) for n in g["common_nodes"])
+            common = common or '<span class="muted">空（成员仅经传递相连，无全体共有节点）</span>'
+            link_desc = "；".join(
+                "事件 " + " — ".join(str(x) for x in lk["events"])
+                + " 共享：" + "、".join(escape(n["name"]) for n in lk["shared_nodes"])
+                for lk in g["links"]) or '<span class="muted">—</span>'
+            rows += f"""<tr>
+<td>{escape(g['group_id'])}</td>
+<td>{escape(g['metric_label'])}</td>
+<td>{_fmt_ts(g['start_ts'])}<br>至 {_fmt_ts(g['end_ts'])}</td>
+<td>{arts}<br><span class="muted">{g['artifact_count']} 件文物 / {g['event_count']} 个事件</span></td>
+<td><span class="badge open">{g['open_events']}</span> / <span class="badge closed">{g['closed_events']}</span></td>
+<td>{common}</td>
+<td>{link_desc}</td>
+</tr>"""
+
+    hint_html = f'<p class="muted">{escape(hint)}</p>' if hint else ""
+    return f"""<div class="card">
+  <h2>{escape(title)}</h2>
+  {hint_html}
+  <table>
+    <tr><th>组号</th><th>指标</th><th>组起止时间</th><th>文物 / 事件</th>
+        <th>开放 / 已关闭</th><th>全组共有节点</th><th>连边（传递路径，不代表每对成员都有共同节点）</th></tr>
+    {rows}
+  </table>
+</div>"""
+
+
+def batch_detail(batch, nodes, artifacts, summary, events, gaps, risk_groups, versions,
                  msg=None, err=None):
     node_rows = "".join(
         f"<tr><td>{n['seq']}</td><td>{escape(n['name'])}</td><td>{escape(n['location'])}</td></tr>"
@@ -270,6 +306,9 @@ def batch_detail(batch, nodes, artifacts, summary, events, gaps, versions,
   </table>
 </div>
 
+{_risk_groups_card(risk_groups, f"跨文物共因风险组（当前版本 v{cur_ver}）" if cur_ver else "跨文物共因风险组",
+                   "同指标、起止闭区间相交且共享至少一个运输节点的事件连边，取连通分量；仅覆盖至少两件文物的分量成组。可调用 /api/batches/" + str(batch['id']) + "/risk-groups 查询，历史版本用 /risk-groups?version=n。")}
+
 <div class="card">
   <h2>缺测区间（当前版本）</h2>
   <table><tr><th>文物</th><th>区间</th><th>约定采样间隔</th><th>实际间隔</th></tr>{gap_rows}</table>
@@ -317,6 +356,8 @@ def version_page(batch, detail):
     {_event_rows(detail['events'], batch['id'], closable=False)}
   </table>
 </div>
+{_risk_groups_card(detail.get('risk_groups', []), f"跨文物共因风险组（v{v['version_no']} 快照）",
+                   "按该版本事件快照计算，补录/更正读数生成新版后重算；旧版分组保持可查，关闭事件只更新组内状态计数，不改变成员。")}
 <div class="card">
   <h2>缺测区间</h2>
   <table><tr><th>文物</th><th>区间</th><th>约定采样间隔</th><th>实际间隔</th></tr>{gap_rows}</table>

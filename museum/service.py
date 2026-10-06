@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 
 from .diff import diff_events, diff_readings
 from .evaluate import METRIC_LABELS, evaluate_artifact
+from .riskgroups import find_risk_groups
+
+RISK_GROUP_RULE = (
+    "同一指标的两个风险事件，起止时间闭区间相交且涉及至少一个相同运输节点时连边；"
+    "取连通分量，仅覆盖至少两件文物的分量成组，经传递相连的成员同样纳入；"
+    "全组共有节点为全体成员涉及节点的交集，可能为空（传递相连不要求每对成员都有共同节点）。"
+)
 
 
 class ValidationError(Exception):
@@ -217,11 +224,41 @@ def list_batches(conn):
 def version_detail(conn, batch_id, version_no):
     v = get_version(conn, batch_id, version_no)
     names = _artifact_names(conn, batch_id)
+    events = version_events(conn, v["id"], names)
     return {
         "version": dict(v),
         "readings": version_readings(conn, v["id"]),
-        "events": version_events(conn, v["id"], names),
+        "events": events,
         "gaps": version_gaps(conn, v["id"], names),
+        "risk_groups": find_risk_groups(events),
+    }
+
+
+def version_risk_groups(conn, batch_id, version_no=None):
+    """跨文物共因风险组。version_no 为空时取当前版本；无任何版本时返回空列表。
+
+    分组按版本从事件快照即时计算：补录/更正读数生成新版本后自动得到新版分组，
+    旧版分组始终可查；关闭事件只改变事件状态与组内开放/已关闭计数，不改变成员。
+    """
+    get_batch(conn, batch_id)
+    if version_no is None:
+        v = current_version(conn, batch_id)
+        if not v:
+            return {
+                "batch_id": batch_id,
+                "version": None,
+                "rule": RISK_GROUP_RULE,
+                "groups": [],
+            }
+    else:
+        v = get_version(conn, batch_id, version_no)
+    names = _artifact_names(conn, batch_id)
+    events = version_events(conn, v["id"], names)
+    return {
+        "batch_id": batch_id,
+        "version": v["version_no"],
+        "rule": RISK_GROUP_RULE,
+        "groups": find_risk_groups(events),
     }
 
 

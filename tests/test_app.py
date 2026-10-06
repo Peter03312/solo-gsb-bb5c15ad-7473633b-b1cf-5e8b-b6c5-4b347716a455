@@ -9,8 +9,21 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from museum.evaluate import evaluate_artifact
+from museum.riskgroups import find_risk_groups
 
 BASE = datetime(2026, 10, 1, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def _ev(eid, aid, metric, s, e, node_ids, status="open"):
+    """构造风险组算法输入（s/e 为相对 BASE 的分钟数）。"""
+    def ts(m):
+        return (BASE + timedelta(minutes=m)).isoformat()
+    return {
+        "id": eid, "artifact_id": aid, "artifact_name": f"文物{aid}",
+        "metric": metric, "start_ts": ts(s), "end_ts": ts(e),
+        "status": status,
+        "nodes": [{"id": nid, "name": f"节点{nid}"} for nid in node_ids],
+    }
 
 
 def make_reading(minutes, temp, hum, node_id=1, node_name="节点", node_seq=1):
@@ -76,6 +89,91 @@ class EvaluateTest(unittest.TestCase):
         events, gaps = evaluate_artifact(readings, ARTIFACT)
         self.assertEqual(events, [])
         self.assertEqual(gaps, [])
+
+
+class RiskGroupAlgorithmTest(unittest.TestCase):
+    def test_basic_group_same_metric_overlap_shared_node(self):
+        """同指标、闭区间相交、共享节点 → 成组。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 30, [1, 2]),
+            _ev(2, 2, "temperature", 20, 60, [2, 3]),
+        ])
+        self.assertEqual(len(groups), 1)
+        g = groups[0]
+        self.assertEqual(g["artifact_count"], 2)
+        self.assertEqual(g["event_count"], 2)
+        self.assertEqual(g["open_events"], 2)
+        self.assertEqual(g["closed_events"], 0)
+        self.assertEqual({a["id"] for a in g["artifacts"]}, {1, 2})
+        self.assertEqual([n["id"] for n in g["common_nodes"]], [2])
+        self.assertEqual(len(g["links"]), 1)
+        self.assertEqual(g["links"][0]["events"], [1, 2])
+        self.assertEqual([n["id"] for n in g["links"][0]["shared_nodes"]], [2])
+
+    def test_closed_interval_touching_endpoints_overlap(self):
+        """闭区间：一个事件 end 恰好等于另一个 start → 相交。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 20, [1]),
+            _ev(2, 2, "temperature", 20, 40, [1]),
+        ])
+        self.assertEqual(len(groups), 1)
+
+    def test_different_metric_no_edge(self):
+        """指标不同（温度 vs 湿度）即使时间重叠且共享节点也不连边。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 30, [1]),
+            _ev(2, 2, "humidity", 10, 20, [1]),
+        ])
+        self.assertEqual(groups, [])
+
+    def test_no_overlap_no_edge(self):
+        """闭区间不相交（首尾错开）不连边。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 10, [1]),
+            _ev(2, 2, "temperature", 20, 30, [1]),
+        ])
+        self.assertEqual(groups, [])
+
+    def test_overlap_but_no_shared_node_no_edge(self):
+        """时间相交但无共同运输节点不连边。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 30, [1]),
+            _ev(2, 2, "temperature", 10, 20, [2]),
+        ])
+        self.assertEqual(groups, [])
+
+    def test_single_artifact_component_not_a_group(self):
+        """连通分量只覆盖一件文物（即便有多个事件）不成组。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 30, [1]),
+            _ev(2, 1, "temperature", 20, 60, [1]),
+        ])
+        self.assertEqual(groups, [])
+
+    def test_transitive_chain_includes_all_common_nodes_may_be_empty(self):
+        """A-B 共享节点 1、B-C 共享节点 2，A-C 无共同节点：传递相连全纳入，
+        全组共有节点为空，且不得误判 A-C 有共同节点。"""
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 100, [1]),
+            _ev(2, 2, "temperature", 0, 100, [1, 2]),
+            _ev(3, 3, "temperature", 0, 100, [2]),
+        ])
+        self.assertEqual(len(groups), 1)
+        g = groups[0]
+        self.assertEqual(g["artifact_count"], 3)
+        self.assertEqual(g["event_count"], 3)
+        self.assertEqual(g["common_nodes"], [])  # 无全体共有节点
+        pairs = {tuple(sorted(lk["events"])) for lk in g["links"]}
+        self.assertEqual(pairs, {(1, 2), (2, 3)})  # (1,3) 不是连边
+
+    def test_status_counts(self):
+        groups = find_risk_groups([
+            _ev(1, 1, "temperature", 0, 30, [1], status="closed"),
+            _ev(2, 2, "temperature", 10, 40, [1], status="open"),
+        ])
+        g = groups[0]
+        self.assertEqual(g["open_events"], 1)
+        self.assertEqual(g["closed_events"], 1)
 
 
 class ApiTest(unittest.TestCase):
@@ -257,6 +355,141 @@ class ApiTest(unittest.TestCase):
             with urllib.request.urlopen(url) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertIn("text/html", resp.headers["Content-Type"])
+
+class RiskGroupApiTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app
+        cls.tmp = tempfile.TemporaryDirectory()
+        db_path = os.path.join(cls.tmp.name, "test-rg.db")
+        cls.server = app.make_server("127.0.0.1", 0, db_path)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def req(self, method, path, payload=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = json.dumps(payload).encode() if payload is not None else None
+        request = urllib.request.Request(url, data=data, method=method)
+        if data:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    def test_risk_groups_across_versions(self):
+        st, batch = self.req("POST", "/api/batches", {"name": "共因风险测试批次"})
+        self.assertEqual(st, 201)
+        bid = batch["id"]
+        for seq, name in [(1, "库房"), (2, "运输车"), (3, "展厅")]:
+            self.req("POST", f"/api/batches/{bid}/nodes",
+                     {"seq": seq, "name": name})
+        _, a1 = self.req("POST", f"/api/batches/{bid}/artifacts",
+                         {"name": "文物甲", "temp_min": 18, "temp_max": 24,
+                          "hum_min": 45, "hum_max": 60, "sample_interval": 3600})
+        _, a2 = self.req("POST", f"/api/batches/{bid}/artifacts",
+                         {"name": "文物乙", "temp_min": 18, "temp_max": 24,
+                          "hum_min": 45, "hum_max": 60, "sample_interval": 3600})
+        _, det = self.req("GET", f"/api/batches/{bid}")
+        n1, n2, n3 = [n["id"] for n in det["nodes"]]
+        id1, id2 = a1["id"], a2["id"]
+
+        def r(aid, node, ts, t, h=50):
+            return {"artifact_id": aid, "node_id": node, "ts": ts,
+                    "temperature": t, "humidity": h}
+
+        # v1：两文物在运输车（n2）同期温度越界（08:10~08:30 闭区间相交）
+        readings = [
+            r(id1, n1, "2026-10-01T08:00:00Z", 20),
+            r(id1, n2, "2026-10-01T08:10:00Z", 27),
+            r(id1, n2, "2026-10-01T08:20:00Z", 27),
+            r(id1, n3, "2026-10-01T08:30:00Z", 21),
+            r(id2, n2, "2026-10-01T08:10:00Z", 26),
+            r(id2, n2, "2026-10-01T08:20:00Z", 26),
+            r(id2, n3, "2026-10-01T08:30:00Z", 21),
+        ]
+        st, res = self.req("POST", f"/api/batches/{bid}/readings",
+                           {"readings": readings, "note": "v1"})
+        self.assertEqual(st, 201)
+        self.assertEqual(res["version"], 1)
+        v1_temp_events = [e for e in res["events"] if e["metric"] == "temperature"]
+        self.assertEqual(len(v1_temp_events), 2)
+
+        # 当前版风险组
+        st, rg = self.req("GET", f"/api/batches/{bid}/risk-groups")
+        self.assertEqual(st, 200)
+        self.assertEqual(rg["version"], 1)
+        self.assertEqual(len(rg["groups"]), 1)
+        g = rg["groups"][0]
+        self.assertEqual(g["artifact_count"], 2)
+        self.assertEqual({a["id"] for a in g["artifacts"]}, {id1, id2})
+        self.assertEqual([n["name"] for n in g["common_nodes"]], ["运输车"])
+        self.assertEqual(g["open_events"], 2)
+        self.assertEqual(g["closed_events"], 0)
+
+        # 显式 version=1
+        st, rg1 = self.req("GET", f"/api/batches/{bid}/risk-groups?version=1")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(rg1["groups"]), 1)
+
+        # 版本快照内含分组
+        st, snap = self.req("GET", f"/api/batches/{bid}/versions/1")
+        self.assertEqual(len(snap["risk_groups"]), 1)
+
+        # 关闭其中一个事件：只更新所属版本（当前版）状态计数，成员不变
+        close_target = [e for e in v1_temp_events if e["artifact_id"] == id1][0]
+        st, _ = self.req("POST", f"/api/events/{close_target['id']}/close",
+                         {"note": "已处置", "evidence_no": "EV-X-1"})
+        self.assertEqual(st, 200)
+        st, rg_closed = self.req("GET", f"/api/batches/{bid}/risk-groups")
+        g2 = rg_closed["groups"][0]
+        self.assertEqual(g2["event_count"], 2)
+        self.assertEqual(g2["open_events"], 1)
+        self.assertEqual(g2["closed_events"], 1)
+
+        # 补录/更正读数生成 v2：把文物甲运输车读数更正为正常值 → 共因消失，重算分组
+        st, res2 = self.req("POST", f"/api/batches/{bid}/readings", {
+            "note": "更正文物甲运输车读数",
+            "readings": [r(id1, n2, "2026-10-01T08:10:00Z", 21),
+                         r(id1, n2, "2026-10-01T08:20:00Z", 21)],
+        })
+        self.assertEqual(st, 201)
+        self.assertEqual(res2["version"], 2)
+        st, rg2 = self.req("GET", f"/api/batches/{bid}/risk-groups")
+        self.assertEqual(rg2["version"], 2)
+        self.assertEqual(rg2["groups"], [])
+
+        # 旧版分组保持可查（含关闭后的计数）
+        st, old = self.req("GET", f"/api/batches/{bid}/risk-groups?version=1")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(old["groups"]), 1)
+        self.assertEqual(old["groups"][0]["closed_events"], 1)
+
+        # 错误：批次不存在 / 版本不存在（中文错误）
+        st, err = self.req("GET", "/api/batches/9999/risk-groups")
+        self.assertEqual(st, 404)
+        self.assertIn("不存在", err["error"])
+        st, err = self.req("GET", f"/api/batches/{bid}/risk-groups?version=99")
+        self.assertEqual(st, 404)
+        self.assertIn("版本 99 不存在", err["error"])
+        st, err = self.req("GET", f"/api/batches/{bid}/versions/99/risk-groups")
+        self.assertEqual(st, 404)
+        self.assertIn("版本 99 不存在", err["error"])
+
+        # 页面包含风险组区块
+        for path in (f"/batches/{bid}", f"/batches/{bid}/versions/1"):
+            url = f"http://127.0.0.1:{self.port}{path}"
+            with urllib.request.urlopen(url) as resp:
+                html = resp.read().decode()
+            self.assertIn("跨文物共因风险组", html)
 
 
 if __name__ == "__main__":
