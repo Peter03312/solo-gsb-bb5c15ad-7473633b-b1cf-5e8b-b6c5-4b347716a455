@@ -17,6 +17,10 @@ Docker 镜像无需安装任何包即可构建运行。
 - **评估版本**：补录或更正读数自动生成新的评估版本；旧版本的读数与关闭结论保持
   可查（只读快照）；**新版事件不自动继承关闭状态**；提供版本间差异展示
   （新增/更正/移除读数，新增/消失/变化事件，关闭状态未继承清单）。
+- **跨文物共因风险组**：按评估版本对风险事件做连通分量分组——同一指标的两个事件
+  在起止时间闭区间相交且涉及至少一个相同运输节点时连边，覆盖至少两件文物的
+  连通分量成组（传递相连的成员一并纳入）；生成新版本时重算分组，旧版分组保持可查；
+  关闭事件只更新所属版本的状态计数，不改变分组成员。
 - **输入校验**：重复时间戳、无序上下限（下限 > 上限）、非数值读数一律拒绝保存，
   并返回中文原因。
 - **页面**：首页与批次页展示批次风险摘要（开放/已关闭事件、按指标统计、缺测区间数、
@@ -57,7 +61,7 @@ python3 app.py
 
 - 页面入口：<http://localhost:8000/>
   - `/` 批次列表与风险摘要
-  - `/batches/<id>` 批次详情（摘要、节点、文物、读数录入、事件处置、缺测区间、版本）
+  - `/batches/<id>` 批次详情（摘要、节点、文物、读数录入、事件处置、缺测区间、共因风险组、版本）
   - `/batches/<id>/versions/<n>` 历史版本只读快照
   - `/batches/<id>/diff?from=<a>&to=<b>` 版本差异
 - API 前缀：`http://localhost:8000/api`
@@ -74,6 +78,8 @@ python3 app.py
 | `readings`  | 读数：绑定版本、文物、节点、时间戳、温度、湿度；`corrected_from` 标记更正来源 |
 | `events`    | 风险事件：指标、起止时间、读数个数、实测范围、限值、涉及节点、最大偏离、状态与关闭结论 |
 | `gaps`      | 缺测区间：起止时间、约定间隔、实际间隔                                |
+| `risk_groups` | 共因风险组：版本内组号、指标、组起止时间、全组共有节点（JSON，可为空）、文物数、事件数 |
+| `risk_group_events` | 组-事件关联：分组成员（关闭事件不改变成员）                  |
 
 ## 业务规则
 
@@ -86,7 +92,13 @@ python3 app.py
 4. **版本化**：每次提交读数（追加/补录/更正）都生成新版本并重新评估；
    更正指同一文物同一时间戳但数值不同（旧版本中的旧值保持不变）；
    新版本事件一律为开放状态，不继承旧版关闭结论。
-5. **拒绝保存**（返回 400 与中文原因）：
+5. **共因风险组**：对每个评估版本的事件按指标分别建图——两个事件的
+   起止时间**闭区间**相交（端点相接也算）且涉及**至少一个相同运输节点**时连边；
+   取连通分量，**覆盖至少两件文物**的分量成组，传递相连的成员全部纳入
+   （不要求每对成员都有共同节点，因此**全组共有节点可能为空**）。
+   生成新版本时重算分组；旧版本分组保持可查；关闭事件只更新所属版本
+   分组的开放/已关闭计数，不改变成员，也不影响其他版本。
+6. **拒绝保存**（返回 400 与中文原因）：
    - 重复时间戳：同一提交内重复，或与当前版本已有读数完全相同；
    - 无序上下限：温度/湿度下限大于上限；
    - 非数值读数：温度/湿度无法解析为数值；
@@ -107,8 +119,9 @@ python3 app.py
 | POST | `/api/batches/<id>/readings` | 提交读数，生成新评估版本 |
 | GET  | `/api/batches/<id>/summary` | 批次风险摘要（当前版本） |
 | GET  | `/api/batches/<id>/events?status=open&version=<n>` | 事件列表（默认当前版本） |
+| GET  | `/api/batches/<id>/risk-groups?version=<n>` | 跨文物共因风险组（默认当前版本） |
 | GET  | `/api/batches/<id>/versions` | 版本列表 |
-| GET  | `/api/batches/<id>/versions/<n>` | 版本快照（读数、事件、缺测区间） |
+| GET  | `/api/batches/<id>/versions/<n>` | 版本快照（读数、事件、缺测区间、风险组） |
 | GET  | `/api/batches/<id>/diff?from=<a>&to=<b>` | 版本差异 |
 | POST | `/api/events/<id>/close` | 关闭事件（须处置说明 + 证据编号） |
 
@@ -160,6 +173,26 @@ curl -s -X POST $BASE/api/batches/1/readings -H 'Content-Type: application/json'
   -d '{"readings":[{"artifact_id":1,"node_id":1,"ts":"2026-10-01T10:00:00Z","temperature":"偏高","humidity":50}]}' # 非数值
 curl -s -X POST $BASE/api/batches/1/artifacts -H 'Content-Type: application/json' \
   -d '{"name":"错误示例","temp_min":30,"temp_max":10,"hum_min":45,"hum_max":60,"sample_interval":600}'              # 无序上下限
+
+# 9. 登记第二件文物并提交同时段越界读数（生成 v3，重算共因风险组）
+curl -s -X POST $BASE/api/batches/1/artifacts -H 'Content-Type: application/json' \
+  -d '{"name":"青铜鼎","temp_min":18,"temp_max":24,"hum_min":45,"hum_max":60,"sample_interval":600}'
+curl -s -X POST $BASE/api/batches/1/readings -H 'Content-Type: application/json' -d '{
+  "note": "补录青铜鼎数据",
+  "readings": [
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:15:00Z","temperature":20,"humidity":50},
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:25:00Z","temperature":28,"humidity":50},
+    {"artifact_id":2,"node_id":3,"ts":"2026-10-01T08:35:00Z","temperature":26,"humidity":50},
+    {"artifact_id":2,"node_id":3,"ts":"2026-10-01T08:45:00Z","temperature":21,"humidity":50}
+  ]}'
+
+# 10. 查询当前版共因风险组：两件文物的温度事件在展厅时段相交且共用节点 → 成组
+curl -s "$BASE/api/batches/1/risk-groups"
+
+# 11. 查询历史版本的风险组（旧版分组保持可查；批次/版本不存在返回中文错误）
+curl -s "$BASE/api/batches/1/risk-groups?version=1"
+curl -s "$BASE/api/batches/999/risk-groups"          # 404 {"error": "批次 999 不存在"}
+curl -s "$BASE/api/batches/1/risk-groups?version=99" # 404 {"error": "批次 1 的版本 99 不存在"}
 ```
 
 也可以直接运行端到端演示脚本（服务启动后）：
@@ -167,6 +200,54 @@ curl -s -X POST $BASE/api/batches/1/artifacts -H 'Content-Type: application/json
 ```bash
 ./scripts/demo.sh
 ```
+
+## 跨文物共因风险组（本轮新增）
+
+**用途**：同一评估版本内，若多件文物的风险事件在同一时段、经过相同运输节点，
+往往指向同一外部原因（如车厢温控失效）。系统按版本自动把这类事件聚成
+"共因风险组"，便于整体处置与复盘。
+
+**分组规则**（对每个评估版本独立计算）：
+
+1. 仅**同一指标**（温度/湿度）的事件之间可能连边；
+2. 两个事件的**起止时间闭区间相交**（`start₁ ≤ end₂` 且 `start₂ ≤ end₁`，
+   端点相接也算相交），且涉及**至少一个相同运输节点**时连边；
+3. 取连通分量，**覆盖至少两件文物**的分量成为一个组；
+   **传递相连**的成员（A 与 B 相连、B 与 C 相连）全部纳入同一组——
+   这并不要求每对成员都有共同节点，因此"全组共有节点"（所有成员节点
+   集合的交集）**可能为空**；
+4. 补录或更正读数生成新版本时**重算分组**；旧版本分组保持可查；
+   关闭事件只更新所属版本分组的开放/已关闭计数，**不改变分组成员**。
+
+**查询接口**：`GET /api/batches/<id>/risk-groups`（默认当前版本，
+`?version=<n>` 指定历史版本）。响应示例：
+
+```json
+{
+  "batch_id": 1,
+  "version": 3,
+  "groups": [
+    {
+      "group_id": 1,
+      "group_no": 1,
+      "metric": "temperature",
+      "metric_label": "温度",
+      "start_ts": "2026-10-01T08:25:00+00:00",
+      "end_ts": "2026-10-01T08:35:00+00:00",
+      "common_nodes": [{"id": 3, "name": "展厅"}],
+      "artifacts": [{"id": 1, "name": "青花瓷瓶"}, {"id": 2, "name": "青铜鼎"}],
+      "open_events": 2,
+      "closed_events": 0,
+      "events": [ {"id": 5, "artifact_id": 1, "status": "open", ...}, ... ]
+    }
+  ]
+}
+```
+
+字段说明：`start_ts`/`end_ts` 为组内事件的最早开始/最晚结束；
+`common_nodes` 为全组共有节点（可为空数组 `[]`）；`open_events`/
+`closed_events` 按事件当前状态实时统计。批次详情页展示当前版风险组，
+版本快照页展示历史版本分组；批次或版本不存在时返回 404 与中文错误。
 
 ## 运行测试
 
@@ -181,11 +262,12 @@ python3 -m unittest discover -s tests -v
 ├── museum/
 │   ├── db.py            # SQLite 连接与表结构
 │   ├── evaluate.py      # 风险事件评估（跨节点合并、缺测中断）
+│   ├── groups.py        # 跨文物共因风险组（连通分量分组）
 │   ├── diff.py          # 版本差异计算
 │   ├── service.py       # 业务逻辑与校验
 │   ├── web.py           # 极简路由/响应封装
 │   └── pages.py         # 中文页面渲染
-├── tests/test_app.py    # 评估逻辑单元测试 + API 端到端测试
+├── tests/test_app.py    # 评估/分组逻辑单元测试 + API 端到端测试
 ├── scripts/demo.sh      # curl 端到端演示
 ├── Dockerfile
 ├── docker-compose.yml

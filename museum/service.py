@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from .diff import diff_events, diff_readings
 from .evaluate import METRIC_LABELS, evaluate_artifact
+from .groups import build_risk_groups
 
 
 class ValidationError(Exception):
@@ -222,6 +223,63 @@ def version_detail(conn, batch_id, version_no):
         "readings": version_readings(conn, v["id"]),
         "events": version_events(conn, v["id"], names),
         "gaps": version_gaps(conn, v["id"], names),
+        "risk_groups": version_risk_groups(conn, v["id"], names),
+    }
+
+
+def version_risk_groups(conn, version_id, artifact_names):
+    """指定评估版本的跨文物共因风险组。
+
+    开放/已关闭计数按事件当前状态实时统计：关闭事件只更新其所属版本的
+    状态计数，分组成员与历史版本分组均不变。
+    """
+    rows = conn.execute(
+        "SELECT * FROM risk_groups WHERE version_id=? ORDER BY group_no",
+        (version_id,),
+    ).fetchall()
+    groups = []
+    for g in rows:
+        member_rows = conn.execute(
+            """SELECT e.* FROM risk_group_events rge
+               JOIN events e ON e.id = rge.event_id
+               WHERE rge.group_id=? ORDER BY e.start_ts, e.artifact_id, e.id""",
+            (g["id"],),
+        ).fetchall()
+        events = [_event_dict(m, artifact_names) for m in member_rows]
+        artifacts = {}
+        for e in events:
+            artifacts.setdefault(e["artifact_id"], e["artifact_name"])
+        groups.append({
+            "group_id": g["id"],
+            "group_no": g["group_no"],
+            "metric": g["metric"],
+            "metric_label": METRIC_LABELS.get(g["metric"], g["metric"]),
+            "start_ts": g["start_ts"],
+            "end_ts": g["end_ts"],
+            "common_nodes": json.loads(g["common_nodes"]),
+            "artifacts": [{"id": aid, "name": nm}
+                          for aid, nm in sorted(artifacts.items())],
+            "open_events": sum(1 for e in events if e["status"] == "open"),
+            "closed_events": sum(1 for e in events if e["status"] == "closed"),
+            "events": events,
+        })
+    return groups
+
+
+def batch_risk_groups(conn, batch_id, version_no=None):
+    """批次某一评估版本（默认当前版本）的跨文物共因风险组。"""
+    get_batch(conn, batch_id)
+    if version_no is None:
+        v = current_version(conn, batch_id)
+        if not v:
+            return {"batch_id": batch_id, "version": None, "groups": []}
+    else:
+        v = get_version(conn, batch_id, version_no)
+    names = _artifact_names(conn, batch_id)
+    return {
+        "batch_id": batch_id,
+        "version": v["version_no"],
+        "groups": version_risk_groups(conn, v["id"], names),
     }
 
 
@@ -441,6 +499,7 @@ def submit_readings(conn, batch_id, items, note=""):
         "events": detail["events"],
         "gaps": detail["gaps"],
         "readings": detail["readings"],
+        "risk_groups": detail["risk_groups"],
     }
     if prev:
         result["diff"] = version_diff(conn, batch_id, prev["version_no"], version_no)
@@ -477,6 +536,46 @@ def _evaluate_version(conn, version_id, artifacts):
                    expected_interval, actual_interval) VALUES (?,?,?,?,?,?)""",
                 (version_id, artifact_id, iso(g["start_ts"]), iso(g["end_ts"]),
                  g["expected_interval"], g["actual_interval"]),
+            )
+    _regroup_version(conn, version_id)
+
+
+def _regroup_version(conn, version_id):
+    """对指定评估版本重算跨文物共因风险组（每次生成新版本时随评估一并写入）。
+
+    分组只依赖该版本的事件快照；旧版本的分组记录保留不动，保持可查。
+    """
+    rows = conn.execute(
+        "SELECT * FROM events WHERE version_id=?", (version_id,)).fetchall()
+    events = []
+    for r in rows:
+        d = dict(r)
+        d["nodes"] = json.loads(d["nodes"])
+        events.append(d)
+    node_rows = conn.execute(
+        """SELECT n.* FROM nodes n
+           JOIN versions v ON v.batch_id = n.batch_id WHERE v.id=?""",
+        (version_id,),
+    ).fetchall()
+    node_info = {n["id"]: n for n in node_rows}
+    for gno, g in enumerate(build_risk_groups(events), 1):
+        common = [
+            {"id": nid, "name": node_info[nid]["name"]}
+            for nid in sorted(g["common_node_ids"],
+                              key=lambda x: (node_info[x]["seq"], x))
+        ]
+        cur = conn.execute(
+            """INSERT INTO risk_groups(version_id, group_no, metric, start_ts, end_ts,
+               common_nodes, artifact_count, event_count) VALUES (?,?,?,?,?,?,?,?)""",
+            (version_id, gno, g["metric"], iso(g["start_ts"]), iso(g["end_ts"]),
+             json.dumps(common, ensure_ascii=False),
+             len(g["artifact_ids"]), len(g["event_ids"])),
+        )
+        group_id = cur.lastrowid
+        for event_id in g["event_ids"]:
+            conn.execute(
+                "INSERT INTO risk_group_events(group_id, event_id) VALUES (?,?)",
+                (group_id, event_id),
             )
 
 

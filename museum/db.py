@@ -79,9 +79,30 @@ CREATE TABLE IF NOT EXISTS gaps (
     actual_interval REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS risk_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+    group_no INTEGER NOT NULL,
+    metric TEXT NOT NULL,
+    start_ts TEXT NOT NULL,
+    end_ts TEXT NOT NULL,
+    common_nodes TEXT NOT NULL,
+    artifact_count INTEGER NOT NULL,
+    event_count INTEGER NOT NULL,
+    UNIQUE (version_id, group_no)
+);
+
+CREATE TABLE IF NOT EXISTS risk_group_events (
+    group_id INTEGER NOT NULL REFERENCES risk_groups(id) ON DELETE CASCADE,
+    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    UNIQUE (group_id, event_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_readings_version ON readings(version_id, artifact_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_version ON events(version_id, status);
 CREATE INDEX IF NOT EXISTS idx_gaps_version ON gaps(version_id);
+CREATE INDEX IF NOT EXISTS idx_risk_groups_version ON risk_groups(version_id);
+CREATE INDEX IF NOT EXISTS idx_risk_group_events_group ON risk_group_events(group_id);
 """
 
 

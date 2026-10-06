@@ -132,6 +132,49 @@ def home(batches, msg=None, err=None):
     return page("批次列表", body)
 
 
+# ---------------------------------------------------------------- 共因风险组
+
+def _risk_group_rows(groups):
+    rows = ""
+    for g in groups:
+        common = "、".join(escape(n["name"]) for n in g["common_nodes"])
+        if not common:
+            common = '<span class="muted">无（传递相连成组）</span>'
+        arts = "、".join(escape(a["name"]) for a in g["artifacts"])
+        event_lines = "<br>".join(
+            f"#{e['id']} {escape(e['artifact_name'])} · {escape(e['metric_label'])} · "
+            f"{_fmt_ts(e['start_ts'])} 至 {_fmt_ts(e['end_ts'])} · "
+            f"{_status_badge(e['status'])}"
+            for e in g["events"]
+        )
+        rows += f"""<tr>
+<td>G{g['group_no']}</td>
+<td>{escape(g['metric_label'])}</td>
+<td>{_fmt_ts(g['start_ts'])}<br>至 {_fmt_ts(g['end_ts'])}</td>
+<td>{arts}</td>
+<td>{common}</td>
+<td><span class="badge open">{g['open_events']}</span> /
+    <span class="badge closed">{g['closed_events']}</span></td>
+<td>{event_lines}</td>
+</tr>"""
+    return rows or '<tr><td colspan="7" class="muted">该版本无跨文物共因风险组。</td></tr>'
+
+
+def _risk_groups_card(groups, title):
+    return f"""
+<div class="card">
+  <h2>{escape(title)}</h2>
+  <p class="muted">同一指标的事件在起止时间闭区间相交且涉及相同运输节点时连边；
+  覆盖至少两件文物的连通分量成组，传递相连的成员一并纳入，
+  全组共有节点为所有成员节点集合的交集（可为空）。</p>
+  <table>
+    <tr><th>组</th><th>指标</th><th>起止时间</th><th>涉及文物</th>
+        <th>全组共有节点</th><th>开放/已关闭</th><th>组内事件</th></tr>
+    {_risk_group_rows(groups)}
+  </table>
+</div>"""
+
+
 # ---------------------------------------------------------------- 批次详情
 
 def _event_rows(events, batch_id, closable):
@@ -164,8 +207,8 @@ def _event_rows(events, batch_id, closable):
     return rows or '<tr><td colspan="10" class="muted">无风险事件。</td></tr>'
 
 
-def batch_detail(batch, nodes, artifacts, summary, events, gaps, versions,
-                 msg=None, err=None):
+def batch_detail(batch, nodes, artifacts, summary, events, gaps, risk_groups,
+                 versions, msg=None, err=None):
     node_rows = "".join(
         f"<tr><td>{n['seq']}</td><td>{escape(n['name'])}</td><td>{escape(n['location'])}</td></tr>"
         for n in nodes
@@ -202,6 +245,8 @@ def batch_detail(batch, nodes, artifacts, summary, events, gaps, versions,
 
     cur_ver = summary["current_version"]
     event_title = f"当前版本（v{cur_ver}）风险事件" if cur_ver else "风险事件（尚无版本）"
+    group_title = (f"跨文物共因风险组（当前版本 v{cur_ver}）" if cur_ver
+                   else "跨文物共因风险组（尚无版本）")
 
     body = _banner(msg, err) + f"""
 <p><a href="/">← 返回批次列表</a></p>
@@ -275,6 +320,8 @@ def batch_detail(batch, nodes, artifacts, summary, events, gaps, versions,
   <table><tr><th>文物</th><th>区间</th><th>约定采样间隔</th><th>实际间隔</th></tr>{gap_rows}</table>
 </div>
 
+{_risk_groups_card(risk_groups, group_title)}
+
 <div class="card">
   <h2>评估版本</h2>
   <table><tr><th>版本</th><th>生成时间</th><th>备注</th><th>操作</th></tr>{ver_rows}</table>
@@ -317,6 +364,7 @@ def version_page(batch, detail):
     {_event_rows(detail['events'], batch['id'], closable=False)}
   </table>
 </div>
+{_risk_groups_card(detail['risk_groups'], f"跨文物共因风险组（v{v['version_no']} 快照）")}
 <div class="card">
   <h2>缺测区间</h2>
   <table><tr><th>文物</th><th>区间</th><th>约定采样间隔</th><th>实际间隔</th></tr>{gap_rows}</table>

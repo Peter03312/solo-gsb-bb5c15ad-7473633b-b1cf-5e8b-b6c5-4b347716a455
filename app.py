@@ -47,14 +47,15 @@ def batch_page(ctx):
     batch = service.get_batch(ctx.conn, bid)
     summary = service.batch_summary(ctx.conn, bid)
     cur = service.current_version(ctx.conn, bid)
-    events, gaps = [], []
+    events, gaps, risk_groups = [], [], []
     if cur:
         names = {a["id"]: a["name"] for a in service.list_artifacts(ctx.conn, bid)}
         events = service.version_events(ctx.conn, cur["id"], names)
         gaps = service.version_gaps(ctx.conn, cur["id"], names)
+        risk_groups = service.version_risk_groups(ctx.conn, cur["id"], names)
     return Response(pages.batch_detail(
         batch, service.list_nodes(ctx.conn, bid), service.list_artifacts(ctx.conn, bid),
-        summary, events, gaps, service.list_versions(ctx.conn, bid),
+        summary, events, gaps, risk_groups, service.list_versions(ctx.conn, bid),
         ctx.query.get("msg"), ctx.query.get("err")))
 
 
@@ -212,6 +213,14 @@ def api_events(ctx):
     if status:
         events = [e for e in events if e["status"] == status]
     return json_response(events)
+
+
+@router.route("GET", "/api/batches/<bid>/risk-groups")
+def api_risk_groups(ctx):
+    bid = _int(ctx.params["bid"], "批次 id")
+    vno = ctx.query.get("version")
+    version_no = _int(vno, "版本号") if vno else None
+    return json_response(service.batch_risk_groups(ctx.conn, bid, version_no))
 
 
 @router.route("GET", "/api/batches/<bid>/versions")

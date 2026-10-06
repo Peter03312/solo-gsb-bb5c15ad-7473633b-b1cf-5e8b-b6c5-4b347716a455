@@ -63,3 +63,24 @@ echo
 echo "== 9. 批次风险摘要 =="
 curl -s "$BASE/api/batches/1/summary"
 echo
+
+echo "== 10. 登记第二件文物并提交同时段越界读数（生成 v3，重算共因风险组）=="
+curl -s -X POST "$BASE/api/batches/1/artifacts" -H "$JSON" \
+  -d '{"name":"青铜鼎","temp_min":18,"temp_max":24,"hum_min":45,"hum_max":60,"sample_interval":600}'
+curl -s -X POST "$BASE/api/batches/1/readings" -H "$JSON" -d '{
+  "note": "补录青铜鼎数据",
+  "readings": [
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:15:00Z","temperature":20,"humidity":50},
+    {"artifact_id":2,"node_id":2,"ts":"2026-10-01T08:25:00Z","temperature":28,"humidity":50},
+    {"artifact_id":2,"node_id":3,"ts":"2026-10-01T08:35:00Z","temperature":26,"humidity":50},
+    {"artifact_id":2,"node_id":3,"ts":"2026-10-01T08:45:00Z","temperature":21,"humidity":50}
+  ]}'
+echo
+
+echo "== 11. 查询当前版跨文物共因风险组 =="
+curl -s "$BASE/api/batches/1/risk-groups"
+echo
+
+echo "== 12. 查询历史版本（v1）的风险组（旧版分组保持可查）=="
+curl -s "$BASE/api/batches/1/risk-groups?version=1"
+echo
